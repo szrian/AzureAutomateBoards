@@ -1,0 +1,11 @@
+{
+  "type": "Task",
+  "rules": [
+    {
+      "ifChildState": "Done",
+      "notParentStates": [],
+      "setParentStateTo": "Done",
+      "allChildren": true
+    }
+  ]
+}

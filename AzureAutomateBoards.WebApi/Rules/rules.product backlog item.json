@@ -1,0 +1,11 @@
+﻿{
+  "type": "Product Backlog Item",
+  "rules": [
+    {
+      "ifChildState": "Done",
+      "notParentStates": [],
+      "setParentStateTo": "Done",
+      "allChildren": true
+    }
+  ]
+}
