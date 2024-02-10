@@ -21,13 +21,14 @@ public class RulesRepo : IRulesRepo, IDisposable
 
 	public async Task<RulesModel> ListRules(string wit)
 	{
-		string src = _appSettings.Value.SourceForRules;
+		var directoryPath = Path.Combine(AppDomain.CurrentDomain.BaseDirectory, "Rules");
+		var fileName = string.Concat("rules.", wit.ToLower(), ".json");
+		var filePath = Path.Combine(directoryPath, fileName);
 
-		var json = await _httpClient.GetStringAsync(src + "/rules." + wit.ToLower() + ".json");
+		var json = File.ReadAllText(filePath);
 		RulesModel rules = JsonConvert.DeserializeObject<RulesModel>(json);
 
 		return rules;
-
 	}
 
 	public void Dispose()

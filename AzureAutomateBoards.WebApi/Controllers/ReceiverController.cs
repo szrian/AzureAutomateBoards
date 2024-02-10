@@ -43,7 +43,7 @@ public class ReceiverController : Controller
 		// create our azure devops connection
 		Uri baseUri = new Uri("https://dev.azure.com/" + vm.organization);
 
-		VssCredentials clientCredentials = new VssCredentials(new VssBasicCredential("matheus.marques.external@agcocorp.com", vm.pat));
+		VssCredentials clientCredentials = new VssCredentials(new VssBasicCredential("rian_s_araujo@hotmail.com", vm.pat));
 		VssConnection vssConnection = new VssConnection(baseUri, clientCredentials);
 
 		// load the work item posted 
