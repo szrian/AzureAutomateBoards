@@ -32,73 +32,93 @@ public class ReceiverController : Controller
 	[Route("webhook/workitem/update")]
 	public async Task<IActionResult> Post([FromBody] JObject payload)
 	{
-		PayloadViewModel vm = BuildPayloadViewModel(payload);
-
-		//make sure pat is not empty, if it is, pull from appsettings
-		vm.pat = _appSettings.Value.PersonalAccessToken;
-
-		//if the event type is something other the updated, then lets just return an ok
-		if (vm.eventType != "workitem.updated") return new OkResult();
-
-		// create our azure devops connection
-		Uri baseUri = new Uri("https://dev.azure.com/" + vm.organization);
-
-		VssCredentials clientCredentials = new VssCredentials(new VssBasicCredential("rian_s_araujo@hotmail.com", vm.pat));
-		VssConnection vssConnection = new VssConnection(baseUri, clientCredentials);
-
-		// load the work item posted 
-		WorkItem workItem = await _workItemRepo.GetWorkItem(vssConnection, vm.workItemId);
-
-		// this should never happen, but if we can't load the work item from the id, then exit with error
-		if (workItem == null) return new StandardResponseObjectResult("Error loading workitem '" + vm.workItemId + "'", StatusCodes.Status500InternalServerError);
-
-		// get the related parent
-		WorkItemRelation parentRelation = workItem.Relations.Where<WorkItemRelation>(x => x.Rel.Equals("System.LinkTypes.Hierarchy-Reverse")).FirstOrDefault();
-
-		// if we don't have any parents to worry about, then just abort
-		if (parentRelation == null) return new OkResult();
-
-		Int32 parentId = _helper.GetWorkItemIdFromUrl(parentRelation.Url);
-		WorkItem parentWorkItem = await _workItemRepo.GetWorkItem(vssConnection, parentId);
-
-		if (parentWorkItem == null) return new StandardResponseObjectResult("Error loading parent work item '" + parentId.ToString() + "'", StatusCodes.Status500InternalServerError);
-
-		string parentState = parentWorkItem.Fields["System.State"] == null ? string.Empty : parentWorkItem.Fields["System.State"].ToString();
-
-		// load rules for updated work item
-		RulesModel rulesModel = await _rulesRepo.ListRules(vm.workItemType);
-
-		//loop through each rule
-		foreach (var rule in rulesModel.Rules)
+		try
 		{
-			if (rule.IfChildState.Equals(vm.state))
+			PayloadViewModel vm = BuildPayloadViewModel(payload);
+
+			//make sure pat is not empty, if it is, pull from appsettings
+			vm.pat = _appSettings.Value.PersonalAccessToken;
+
+			//if the event type is something other the updated, then lets just return an ok
+			if (vm.eventType != "workitem.updated") return new OkResult();
+
+			// create our azure devops connection
+			Uri baseUri = new Uri("https://dev.azure.com/" + vm.organization);
+
+			VssCredentials clientCredentials = new VssCredentials(new VssBasicCredential("rian_s_araujo@hotmail.com", vm.pat));
+			VssConnection vssConnection = new VssConnection(baseUri, clientCredentials);
+
+			// load the work item posted 
+			WorkItem workItem = await _workItemRepo.GetWorkItem(vssConnection, vm.workItemId);
+
+			// this should never happen, but if we can't load the work item from the id, then exit with error
+			if (workItem == null) return new StandardResponseObjectResult("Error loading workitem '" + vm.workItemId + "'", StatusCodes.Status500InternalServerError);
+
+			if (workItem.Fields["System.WorkItemType"].ToString().Equals("Feature") && workItem.Fields["System.State"].ToString().Equals("In Progress"))
 			{
-				if (!rule.AllChildren)
+				await InicializeChilds(workItem, vssConnection);
+
+				return new OkResult();
+			}
+
+			if (workItem.Fields["System.WorkItemType"].ToString().Equals("Feature") && workItem.Fields["System.State"].ToString().Equals("Done"))
+			{
+				await FeatureFinished(workItem, vssConnection);
+				return new OkResult();
+			}
+
+			if (workItem.Fields["System.WorkItemType"].ToString().Equals("Product Backlog Item") && workItem.Fields["System.State"].ToString().Equals("Done"))
+				await BackLogFinished(workItem, vssConnection);
+
+			// get the related parent
+			WorkItemRelation parentRelation = workItem.Relations.Where<WorkItemRelation>(x => x.Rel.Equals("System.LinkTypes.Hierarchy-Reverse")).FirstOrDefault();
+
+			// if we don't have any parents to worry about, then just abort
+			if (parentRelation == null) return new OkResult();
+
+			Int32 parentId = _helper.GetWorkItemIdFromUrl(parentRelation.Url);
+			WorkItem parentWorkItem = await _workItemRepo.GetWorkItem(vssConnection, parentId);
+
+			if (parentWorkItem == null) return new StandardResponseObjectResult("Error loading parent work item '" + parentId.ToString() + "'", StatusCodes.Status500InternalServerError);
+
+			string parentState = parentWorkItem.Fields["System.State"] == null ? string.Empty : parentWorkItem.Fields["System.State"].ToString();
+
+			// load rules for updated work item
+			RulesModel rulesModel = await _rulesRepo.ListRules(vm.workItemType);
+
+			//loop through each rule
+			foreach (var rule in rulesModel.Rules)
+			{
+				if (rule.IfChildState.Equals(vm.state))
 				{
-					if (!rule.NotParentStates.Contains(parentState))
+					if (!rule.AllChildren)
 					{
-						await _workItemRepo.UpdateWorkItemState(vssConnection, parentWorkItem, rule.SetParentStateTo);
-						return new OkResult();
+						if (!rule.NotParentStates.Contains(parentState))
+						{
+							await _workItemRepo.UpdateWorkItemState(vssConnection, parentWorkItem, rule.SetParentStateTo);
+						}
+					}
+					else
+					{
+						// get a list of all the child items to see if they are all closed or not
+						List<WorkItem> childWorkItems = await _workItemRepo.ListChildWorkItemsForParent(vssConnection, parentWorkItem);
+
+						// check to see if any of the child items are not closed, if so, we will get a count > 0
+						int count = childWorkItems.Where(x => !x.Fields["System.State"].ToString().Equals(rule.IfChildState)).ToList().Count;
+
+						if (count.Equals(0))
+							await _workItemRepo.UpdateWorkItemState(vssConnection, parentWorkItem, rule.SetParentStateTo);
 					}
 				}
-				else
-				{
-					// get a list of all the child items to see if they are all closed or not
-					List<WorkItem> childWorkItems = await _workItemRepo.ListChildWorkItemsForParent(vssConnection, parentWorkItem);
-
-					// check to see if any of the child items are not closed, if so, we will get a count > 0
-					int count = childWorkItems.Where(x => !x.Fields["System.State"].ToString().Equals(rule.IfChildState)).ToList().Count;
-
-					if (count.Equals(0))
-						await _workItemRepo.UpdateWorkItemState(vssConnection, parentWorkItem, rule.SetParentStateTo);
-
-					return new OkResult();
-				}
-
 			}
+
+			return new StandardResponseObjectResult("success", StatusCodes.Status200OK);
+		}
+		catch (Exception ex)
+		{
+			return new StandardResponseObjectResult(ex.Message, StatusCodes.Status500InternalServerError);
 		}
 
-		return new StandardResponseObjectResult("success", StatusCodes.Status200OK);
 	}
 
 	private PayloadViewModel BuildPayloadViewModel(JObject body)
@@ -139,5 +159,75 @@ public class ReceiverController : Controller
 		}
 
 		return string.Empty;
+	}
+
+	private async Task InicializeChilds(WorkItem featureWorkItem, VssConnection vssConnection)
+	{
+		var featureWorkItemChildRelation = featureWorkItem.Relations.Where<WorkItemRelation>(x => x.Rel.Equals("System.LinkTypes.Hierarchy-Forward")).OrderBy(p => p.Url).FirstOrDefault();
+
+		Int32 backLogId = _helper.GetWorkItemIdFromUrl(featureWorkItemChildRelation.Url);
+		WorkItem backLogWorkItem = await _workItemRepo.GetWorkItem(vssConnection, backLogId);
+
+		await _workItemRepo.UpdateWorkItemState(vssConnection, backLogWorkItem, "In Progress");
+
+		var backLogWorkItemChildRelations = backLogWorkItem.Relations.Where<WorkItemRelation>(x => x.Rel.Equals("System.LinkTypes.Hierarchy-Forward"));
+
+		foreach(var relation in backLogWorkItemChildRelations)
+		{
+			Int32 taskId = _helper.GetWorkItemIdFromUrl(relation.Url);
+			var taskWorkItem = await _workItemRepo.GetWorkItem(vssConnection, taskId);
+
+			await _workItemRepo.UpdateWorkItemState(vssConnection, taskWorkItem, "In Progress");
+		}
+	}
+
+	private async Task BackLogFinished(WorkItem backLogWorkItem, VssConnection vssConnection)
+	{
+		var backLogWorkItemParentRelation = backLogWorkItem.Relations.Where<WorkItemRelation>(x => x.Rel.Equals("System.LinkTypes.Hierarchy-Reverse")).FirstOrDefault();
+
+		Int32 featureId = _helper.GetWorkItemIdFromUrl(backLogWorkItemParentRelation.Url);
+		var featureWorkItem = await _workItemRepo.GetWorkItem(vssConnection, featureId);
+
+		var featureWorkItemChildRelations = featureWorkItem.Relations.Where<WorkItemRelation>(x => x.Rel.Equals("System.LinkTypes.Hierarchy-Forward")).OrderBy(p => p.Url);
+
+		foreach (var relation in featureWorkItemChildRelations)
+		{
+			Int32 backLogId = _helper.GetWorkItemIdFromUrl(relation.Url);
+			var childBackLogWorkItem = await _workItemRepo.GetWorkItem(vssConnection, backLogId);
+
+			if (childBackLogWorkItem.Fields["System.State"].ToString().Equals("New"))
+			{
+				await _workItemRepo.UpdateWorkItemState(vssConnection, childBackLogWorkItem, "Committed");
+
+				var backLogWorkItemChildRelations = childBackLogWorkItem.Relations.Where<WorkItemRelation>(x => x.Rel.Equals("System.LinkTypes.Hierarchy-Forward")).OrderBy(p => p.Url);
+
+				foreach (var taskRelation in backLogWorkItemChildRelations)
+				{
+					Int32 taskId = _helper.GetWorkItemIdFromUrl(taskRelation.Url);
+					var taskWorkItem = await _workItemRepo.GetWorkItem(vssConnection, taskId);
+
+					await _workItemRepo.UpdateWorkItemState(vssConnection, taskWorkItem, "In Progress");
+				}
+
+				break;
+			}
+		}
+	}
+
+	private async Task FeatureFinished(WorkItem featureWorkItem, VssConnection vssConnection)
+	{
+		var featureWorkItemChildRelation = featureWorkItem.Relations.Where<WorkItemRelation>(x => x.Rel.Equals("System.LinkTypes.Hierarchy-Forward")).FirstOrDefault();
+		Int32 backLogId = _helper.GetWorkItemIdFromUrl(featureWorkItemChildRelation.Url);
+
+		var backLogWorkItem = await _workItemRepo.GetWorkItem(vssConnection, backLogId);
+		var backLogWorkItemTitle = backLogWorkItem.Fields["System.Title"].ToString();
+
+		var epicState = backLogWorkItemTitle.Substring(backLogWorkItemTitle.Length - 3);
+		var featureWorkItemParentRelation = featureWorkItem.Relations.Where<WorkItemRelation>(x => x.Rel.Equals("System.LinkTypes.Hierarchy-Reverse")).FirstOrDefault();
+		Int32 epicId = _helper.GetWorkItemIdFromUrl(featureWorkItemParentRelation.Url);
+
+		var epicWorkItem = await _workItemRepo.GetWorkItem(vssConnection, epicId);
+
+		await _workItemRepo.UpdateWorkItemState(vssConnection, epicWorkItem, "In Progress");
 	}
 }
